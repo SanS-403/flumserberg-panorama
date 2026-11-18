@@ -1,4 +1,4 @@
-// Flumserberg Panorama: menu, header state, lightbox, click-to-load map, mailto inquiry. No dependencies, no tracking.
+// Flumserberg Panorama: menu, header state, lightbox, click-to-load map, inquiry form (form service + mailto fallback). No dependencies, no tracking.
 (() => {
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -87,12 +87,15 @@
     });
   }
 
-  // Inquiry: validate, then open the visitor's mail program
+  // Inquiry: validate, send to the form service (mail to the hosts), mailto as fallback.
   const form = $('#inquiry-form');
   if (form) {
     const t = JSON.parse(form.dataset.i18n);
     const arrival = form.arrival;
     const departure = form.departure;
+    const btn = $('button[type="submit"]', form);
+    const status = $('.form-status', form);
+    let busy = false;
     arrival.addEventListener('change', () => {
       if (!arrival.value) return;
       departure.min = arrival.value;
@@ -108,8 +111,28 @@
       return !msg;
     };
     const fmt = (v) => new Date(`${v}T12:00:00`).toLocaleDateString(t.locale, { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' });
-    form.addEventListener('submit', (e) => {
+    const mailtoHref = (subject, body) => `mailto:${form.dataset.mail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    const showFailed = (href) => {
+      status.className = 'form-status is-error';
+      status.textContent = '';
+      const p = document.createElement('span');
+      p.textContent = t.failed;
+      const a = document.createElement('a');
+      a.className = 'btn';
+      a.href = href;
+      a.textContent = t.failedButton;
+      const q = document.createElement('span');
+      q.append(`${t.orWrite} `);
+      const m = document.createElement('a');
+      m.href = `mailto:${form.dataset.mail}`;
+      m.textContent = form.dataset.mail;
+      q.append(m, '.');
+      status.append(p, a, q);
+      a.focus();
+    };
+    form.addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (busy) return;
       const g = Number(form.guests.value);
       const ok = [
         setErr(arrival, arrival.value ? '' : t.errors.arrival),
@@ -121,30 +144,56 @@
       if (!ok) { const bad = form.querySelector('[aria-invalid="true"]'); if (bad) bad.focus(); return; }
       const nights = Math.round((new Date(departure.value) - new Date(arrival.value)) / 864e5);
       const m = t.mail;
-      const subject = `${m.subject}: ${fmt(arrival.value)} – ${fmt(departure.value)}, ${g} ${m.guests}`;
-      const body = [
-        `${m.greeting}`,
-        '',
-        m.intro,
-        '',
-        `${fmt(arrival.value)} – ${fmt(departure.value)} (${nights} ${m.nights})`,
-        `${g} ${m.guests}`,
-        '',
-        form.message.value.trim(),
-        '',
-        m.regards,
-        form.name.value.trim(),
-        form.email.value.trim(),
-      ].join('\n').replace(/\n{3,}/g, '\n\n');
-      const to = form.dataset.mail;
-      window.location.href = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-      const status = $('.form-status', form);
-      status.textContent = `${t.sent} `;
-      const a = document.createElement('a');
-      a.href = `mailto:${to}`;
-      a.textContent = to;
-      status.appendChild(a);
-      status.append('.');
+      const name = form.name.value.trim();
+      const email = form.email.value.trim();
+      const message = form.message.value.trim();
+      const dates = `${fmt(arrival.value)} – ${fmt(departure.value)}`;
+      const subject = /^TEST Anfrage/.test(message) ? 'TEST Anfrage – bitte ignorieren' : `${m.subject}: ${dates}, ${g} ${m.guests} (${name})`;
+      const body = [m.greeting, '', m.intro, '', `${dates} (${nights} ${m.nights})`, `${g} ${m.guests}`, '', message, '', m.regards, name, email].join('\n').replace(/\n{3,}/g, '\n\n');
+      // Bots fill the hidden field; pretend success, send nothing.
+      if (form._honey && form._honey.value) { form.classList.add('is-sent'); status.className = 'form-status is-ok'; status.textContent = t.sent; return; }
+      const f = t.fields;
+      const data = {
+        _subject: subject,
+        _cc: atob(form.dataset.cc),
+        _template: 'table',
+        _replyto: email,
+        _captcha: 'false',
+        [f.name]: name,
+        email,
+        [f.arrival]: fmt(arrival.value),
+        [f.departure]: fmt(departure.value),
+        [m.nights]: nights,
+        [f.guests]: g,
+        [f.message]: message || '–',
+        Website: `${location.origin}${location.pathname}`,
+      };
+      busy = true;
+      form.classList.add('is-sending');
+      btn.setAttribute('aria-disabled', 'true');
+      status.className = 'form-status';
+      status.textContent = t.sending;
+      let sent = false;
+      try {
+        const ctl = new AbortController();
+        const timer = setTimeout(() => ctl.abort(), 20000);
+        const res = await fetch(form.action, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(data), signal: ctl.signal });
+        clearTimeout(timer);
+        const json = await res.json().catch(() => ({}));
+        sent = res.ok && String(json.success) === 'true';
+      } catch (err) { sent = false; }
+      busy = false;
+      form.classList.remove('is-sending');
+      btn.removeAttribute('aria-disabled');
+      if (sent) {
+        form.classList.add('is-sent');
+        status.className = 'form-status is-ok';
+        status.textContent = `${t.sent} ${email}.`;
+        status.setAttribute('tabindex', '-1');
+        status.focus();
+      } else {
+        showFailed(mailtoHref(subject, body));
+      }
     });
   }
 })();
